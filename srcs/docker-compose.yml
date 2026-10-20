@@ -1,0 +1,34 @@
+name: inception
+
+services:
+  mariadb:
+    build: # Dockerfile location
+      context: ./requirements/mariadb
+    image: mariadb:inception
+    pull_policy: never # never use pre configed image
+    restart: unless-stopped # restrat when it crash or abnormal termination, except that do nothing
+    environment:
+      DB_NAME: ${DB_NAME:?DB_NAME is required}
+      DB_USER: ${DB_USER:?DB_USER is required}
+      DB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_root_password
+      - db_password
+    volumes:
+      - mariacb_data:/var/lib/mysql
+    networks:
+      - inception
+
+networks:
+  inception:
+    driver: bridge
+
+volumes:
+  mariadb_data:
+
+secrets:
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  db_password:
+    file: ../secrets/db_password.txt
