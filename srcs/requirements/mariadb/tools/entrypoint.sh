@@ -1,6 +1,5 @@
 #!/bin/sh
 
-# ここ理解する
 
 set -eu
 
@@ -25,7 +24,7 @@ DB_PASSWORD="$(cat "$DB_PASSWORD_FILE")"
 mkdir -p /run/mysqld /var/lib/mysql
 chown -R mysql:mysql /run/mysqld /var/lib/mysql
 
-if [ ! -d /var/lib/mysql/mysql ]; then
+if [ ! -d /var/lib/mysql/mysql ]; then # if internalDB doesn't exist, then initialize db and make user 
 	mariadb-install-db \
 		--user=mysql \
 		--datadir=/var/lib/mysql \

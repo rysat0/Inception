@@ -15,8 +15,12 @@ services:
     secrets: # mount secret files
       - db_root_password
       - db_password
-    volumes:
-      - mariadb_data:/var/lib/mysql # container side location
+    volumes: # container side location
+      - type: volume
+        source: mariadb_data
+        target: /var/lib/mysql
+        volume:
+          nocopy: true # no initialize copy to empty volume -> let me do initialize process made myself
     networks:
       - inception
 
@@ -75,18 +79,7 @@ networks:
 
 volumes:
   mariadb_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/${LOGIN}/data/mariadb # host side location
-
   wordpress_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/${LOGIN}/data/wordpress
 
 secrets:
   db_root_password:
