@@ -34,26 +34,32 @@ DB_PASSWORD="$(cat "$DB_PASSWORD_FILE")"
 mkdir -p /run/mysqld /var/lib/mysql
 chown -R mysql:mysql /run/mysqld /var/lib/mysql
 
+INIT_MARKER=/var/lib/mysql/.inception-initialized
+
 # /var/lib/mysql/mysql: MariaDBの管理用DB
-if [ ! -d /var/lib/mysql/mysql ]; then # if internalDB doesn't exist, then initialize db and make user
+if [ ! -d /var/lib/mysql/mysql ]; then
 	mariadb-install-db \
 		--user=mysql \
 		--datadir=/var/lib/mysql \
 		--auth-root-authentication-method=normal \
 		--skip-test-db
+fi
 
-# initial settings SQL below
+# 初期設定の途中で失敗した場合は、次回起動でSQLを再実行する
+if [ ! -f "$INIT_MARKER" ]; then
 	mariadbd \
 	--user=mysql \
 	--datadir=/var/lib/mysql \
 	--bootstrap \
 	--skip-networking <<SQL # heredoc
+	FLUSH PRIVILEGES;
 	CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 	CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
 	GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';
 	ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';
-	FLUSH PRIVILEGES;
 SQL
+	# すべてのSQLが成功した場合だけ、初期設定の完了を記録する
+	touch "$INIT_MARKER"
 fi
 
 # exec: replace nowgoing shell process to child process -> PID 1 at this situation
