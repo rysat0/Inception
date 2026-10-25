@@ -1,5 +1,7 @@
 # Developer documentation
 
+[日本語版](DEV_DOC_JA.md)
+
 This guide covers environment setup, configuration, builds, container management,
 and persistent storage. For the architecture and design comparisons, see the
 [README](README.md). For website operation, see [USER_DOC.md](USER_DOC.md).

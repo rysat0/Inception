@@ -1,5 +1,7 @@
 # User documentation
 
+[日本語版](USER_DOC_JA.md)
+
 This guide explains how to operate the Inception website after its initial
 configuration. For a fresh installation, follow the [README](README.md).
 Run terminal commands inside the VM from the project root, where the `Makefile`
