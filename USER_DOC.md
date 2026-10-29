@@ -14,9 +14,12 @@ is located.
 | NGINX | The HTTPS entry point at `https://rysato.42.fr/`. |
 | WordPress / PHP-FPM | The website, content editor, accounts, and comments. |
 | MariaDB | Storage for posts, pages, comments, accounts, and website settings. |
+| Static website (`website`) | An HTML/CSS introduction to 42 Tokyo at `https://rysato.42.fr/intro/`. |
+| Adminer | Browser-based database access at `https://rysato.42.fr/adminer/`. |
 
-Only HTTPS port 443 is published. MariaDB and PHP-FPM are reached internally
-by the other services; they have no separate browser interface.
+Only HTTPS port 443 is published by the frontend NGINX. It routes requests to
+WordPress, the static website, and Adminer. Database access from a browser goes
+through Adminer; MariaDB and PHP-FPM ports are not published on the VM.
 
 ## Start and stop the project
 
@@ -27,7 +30,8 @@ make
 make ps
 ```
 
-All three services (`mariadb`, `wordpress`, and `nginx`) should appear as `Up`.
+All five services (`mariadb`, `wordpress`, `nginx`, `website`, and `adminer`)
+should appear as `Up`.
 The first startup may take longer while WordPress is downloaded and installed.
 Use the checks below to confirm that the website is ready.
 
@@ -39,7 +43,7 @@ Use the checks below to confirm that the website is ready.
 | `make down` | Removes containers and the project network, preserving website and database volumes. |
 | `make re` | Removes the containers, then builds and starts the project again. Preserves the volumes. |
 
-Saved website content survives these commands because it is stored in named
+Saved WordPress content survives these commands because it is stored in named
 volumes. Deleting those volumes removes the stored data. Use `make` after a VM
 reboot if the services have not started automatically.
 
@@ -61,6 +65,33 @@ credentials section below. Signing in as an author gives fewer dashboard options
 than signing in as an administrator.
 
 Always include `https://` in the address. HTTP on port 80 is not available.
+
+| Page | URL |
+| --- | --- |
+| WordPress | `https://rysato.42.fr/` |
+| WordPress administration | `https://rysato.42.fr/wp-admin/` |
+| Static 42 Tokyo introduction | `https://rysato.42.fr/intro/` |
+| Adminer | `https://rysato.42.fr/adminer/` |
+
+`/intro` and `/adminer` redirect to the corresponding paths with a trailing `/`.
+The static page is public and requires no login.
+
+### Sign in to Adminer
+
+Open `https://rysato.42.fr/adminer/` and enter the database account details:
+
+| Field | Value |
+| --- | --- |
+| System, if shown | MySQL, which also connects to MariaDB. |
+| Server | `mariadb` |
+| Username | `DB_USER` from `srcs/.env`. |
+| Password | The database account's current password; initially from `secrets/db_password.txt`. |
+| Database | `DB_NAME` from `srcs/.env`. |
+
+After signing in, select a table such as `wp_posts` and view its rows.
+Use the database account listed above for Adminer. WordPress administrator and
+author accounts belong to the WordPress website and use different credentials.
+The MariaDB root account is configured for local access in the database container.
 
 ### Edit content and check comments
 
@@ -87,8 +118,8 @@ local files under `secrets/`, relative to the project root.
 | WordPress database account | `DB_USER` in `srcs/.env` | `secrets/db_password.txt` |
 | MariaDB administrator | `root` | `secrets/db_root_password.txt` |
 
-The database accounts are for database administration and service connections;
-use a WordPress account for the website login. View password files only in a
+Use the database account for Adminer and service connections, and a WordPress
+account for the WordPress website login. View password files only in a
 private session. Keep `srcs/.env` and `secrets/` outside version control and
 restrict password file access to the VM operator.
 
@@ -122,7 +153,7 @@ make ps
 make logs
 ```
 
-Expect three services to remain `Up`, with port `443` published by NGINX.
+Expect all five services to remain `Up`, with port `443` published by NGINX.
 Repeated `Restarting` or `Exited` states indicate a startup problem.
 Press Ctrl+C to leave the log viewer; this does not stop the services.
 
@@ -132,7 +163,8 @@ For one service only, use its name:
 docker compose -f srcs/docker-compose.yml logs --tail=100 wordpress
 ```
 
-Replace `wordpress` with `mariadb` or `nginx` to inspect the other services.
+Replace `wordpress` with `mariadb`, `nginx`, `website`, or `adminer` to inspect
+the other services.
 
 ### WordPress and database readiness
 
@@ -165,6 +197,23 @@ the request to the local VM without depending on `/etc/hosts`, and `-k` skips
 certificate verification for the self-signed certificate. Also open the website
 in a browser and check that saved content is visible.
 
+### Static website and Adminer
+
+```sh
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/style.css
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
+```
+
+Expect `200 OK`; the stylesheet should have `Content-Type: text/css`.
+In a browser, check that the introduction page is styled and that Adminer can
+sign in and display the existing WordPress tables. Also check the WordPress
+homepage and dashboard after rebuilding or rebooting the VM.
+
+The static website files and Adminer application are included in their images.
+The developer must rebuild the relevant image after editing source files.
+Database changes made through Adminer are stored in MariaDB's existing volume.
+
 ## Common problems
 
 | Symptom | What to check |
@@ -173,7 +222,9 @@ in a browser and check that saved content is visible.
 | A certificate warning appears. | The project uses a self-signed certificate. Confirm that the address is your configured project domain before accepting it. |
 | HTTP fails to connect. | Use `https://`; port 80 is not published. |
 | HTTPS fails to connect. | Check that the VM and Docker are running, `make ps` shows NGINX as `Up`, and port 443 is reachable from the browser's computer. |
-| The site returns `502 Bad Gateway`. | Inspect WordPress and NGINX logs; PHP-FPM may still be starting or may have exited. |
+| A page returns `502 Bad Gateway`. | Inspect NGINX and the target service logs: `website` for `/intro/`, `adminer` for `/adminer/`, or `wordpress` for the WordPress site. |
+| The introduction page has no styling or shows old content. | Check `/intro/style.css`, rebuild with `make up` after source changes, and reload the page without the browser cache. |
+| Adminer rejects the login. | Use server `mariadb`, `DB_USER`, `DB_NAME`, and the current database password. Check MariaDB's logs and account settings. |
 | WordPress reports a database connection error. | Inspect MariaDB and WordPress logs. Check that the database account and stored WordPress configuration agree. |
 | A password file is missing or empty. | Restore the correct file listed above, then run `make`. Replacing it with a new password will not update an existing account. |
 | Login fails after a password change. | Use the current WordPress password; its initial secret file may be out of date. Ask the administrator to reset the account if necessary. |

@@ -9,9 +9,10 @@ inside a Linux virtual machine using Docker Compose. It focuses on building
 service images, configuring networking and TLS, initializing a database, and
 preserving application data across container recreation and VM reboots.
 
-The stack contains three services built from custom Dockerfiles based on
-`debian:bookworm`. NGINX serves the website over HTTPS, WordPress runs through
-PHP-FPM, and MariaDB stores the website's database.
+The stack contains five services built from custom Dockerfiles based on
+`debian:bookworm`. The mandatory services are NGINX, WordPress with PHP-FPM,
+and MariaDB. Two bonus services provide a static introduction to 42 Tokyo
+and the Adminer database management interface.
 
 ## Project description
 
@@ -22,22 +23,35 @@ Browser
    |
    | HTTPS :443 (TLS 1.2 or TLS 1.3)
    v
- NGINX ---- FastCGI :9000 ----> WordPress / PHP-FPM
-                                      |
-                                      | SQL :3306
-                                      v
-                                   MariaDB
+ NGINX
+   |-- /            -- FastCGI :9000 --> wordpress -- SQL :3306 --> mariadb
+   |-- /intro/      -- HTTP    :8080 --> website
+   `-- /adminer/    -- FastCGI :9000 --> adminer   -- SQL :3306 --> mariadb
 ```
 
 | Service | Role | Persistent data |
 | --- | --- | --- |
-| `nginx` | Terminates TLS, serves static files, and forwards PHP requests to WordPress. | Reads `wordpress_data` at `/var/www/html` through a read-only mount. |
+| `nginx` | Terminates TLS, serves WordPress static files, and routes requests to WordPress, the introduction site, and Adminer. | Reads `wordpress_data` at `/var/www/html` through a read-only mount. |
 | `wordpress` | Initializes WordPress with WP-CLI and runs PHP-FPM 8.2. | Writes website files to `wordpress_data` at `/var/www/html`. |
 | `mariadb` | Initializes the database and the WordPress database account, then runs MariaDB. | Stores database files in `mariadb_data` at `/var/lib/mysql`. |
+| `website` | Runs a separate NGINX instance serving the HTML/CSS introduction to 42 Tokyo on internal port 8080. | Static files are copied into its image; no persistent volume. |
+| `adminer` | Runs Adminer with PHP-FPM 8.2 on internal port 9000 for browser-based database access. | Application files are in its image; database changes are stored by MariaDB. |
 
 Only NGINX publishes a host port: `443`. Port `80` is not published, so there
 is no HTTP-to-HTTPS redirect. PHP-FPM and MariaDB communicate with other
 containers through the Compose bridge network using service names.
+
+### Bonus features
+
+- **Static website:** `https://rysato.42.fr/intro/` serves a simple 42 Tokyo
+  introduction written in HTML and CSS. The frontend NGINX proxies requests
+  to the dedicated `website` container over HTTP. `/intro` redirects to `/intro/`.
+- **Adminer:** `https://rysato.42.fr/adminer/` provides a database management
+  interface. The frontend NGINX forwards FastCGI requests to the dedicated
+  `adminer` container, which connects to MariaDB. `/adminer` redirects to `/adminer/`.
+
+Both services have their own Dockerfiles and containers and are started by the
+same `make` command as the mandatory services.
 
 ### Initialization and design choices
 
@@ -51,9 +65,10 @@ containers through the Compose bridge network using service names.
 - **NGINX:** generates a self-signed certificate for `DOMAIN_NAME`, substitutes
   that variable into its configuration template, and checks the configuration
   before starting. Only TLS 1.2 and TLS 1.3 are enabled.
-- **Process lifecycle:** each entrypoint finishes with `exec` to run its service
-  in the foreground as the container's main process. Compose uses
-  `restart: unless-stopped` for all three services.
+- **Process lifecycle:** the mandatory service entrypoints finish with `exec`.
+  The `website` and `adminer` images use exec-form `CMD` to run NGINX and PHP-FPM
+  directly in the foreground. Compose uses `restart: unless-stopped` for all
+  five services.
 - **Storage:** two named volumes preserve database and website files. Docker's
   data-root is configured under `/home/rysato/data` in the VM so these volumes
   satisfy the project's storage location requirement.
@@ -74,28 +89,36 @@ containers through the Compose bridge network using service names.
 ├── Makefile
 ├── README.md
 ├── DEV_DOC.md
+├── DEV_DOC_JA.md
 ├── USER_DOC.md
+├── USER_DOC_JA.md
 ├── Inception.pdf
 └── srcs/
+    ├── .env.example
     ├── docker-compose.yml
     ├── config/
     │   └── daemon.json.example
     └── requirements/
         ├── mariadb/
         ├── nginx/
-        └── wordpress/
+        ├── wordpress/
+        └── bonus/
+            ├── website/
+            └── adminer/
 ```
 
-Each service directory contains a `Dockerfile`, configuration files in `conf/`,
-and an entrypoint script in `tools/`. The local `srcs/.env` and root `secrets/`
-directory are excluded from Git.
+Each service directory contains a `Dockerfile` and configuration files in `conf/`.
+The mandatory services also contain entrypoint scripts in `tools/`, and the
+`website` service contains its HTML/CSS in `site/`. The local `srcs/.env` and root
+`secrets/` directory are excluded from Git. User and developer guides are
+available in English and Japanese.
 
 ## Instructions
 
 ### Prerequisites
 
 Use a Linux VM with Docker Engine, the Docker Compose plugin, Make, OpenSSL,
-and curl. The VM needs internet access to download packages, WP-CLI, and
+and curl. The VM needs internet access to download packages, WP-CLI, Adminer, and
 WordPress. Its clock must be synchronized for package repository and TLS checks.
 Docker must be running, and the current user must be able to run Docker commands.
 
@@ -216,6 +239,26 @@ certificate is self-signed. After accepting it for this local project, sign in a
 `secrets/wp_admin_password.txt`. The author account uses `WP_USER` and
 `secrets/wp_user_password.txt`.
 
+### Website addresses and Adminer login
+
+| Page | URL |
+| --- | --- |
+| WordPress | `https://rysato.42.fr/` |
+| WordPress administration | `https://rysato.42.fr/wp-admin/` |
+| Static 42 Tokyo introduction | `https://rysato.42.fr/intro/` |
+| Adminer | `https://rysato.42.fr/adminer/` |
+
+In Adminer, select MySQL if a system selector is shown. Set the server to
+`mariadb`, the username to `DB_USER`, and the database to `DB_NAME` from
+`srcs/.env`. Use that database account's current password, initially supplied
+by `secrets/db_password.txt`. WordPress website accounts are separate from
+database accounts. Adminer receives credentials through its login form and
+does not mount the password files.
+
+See [USER_DOC.md](USER_DOC.md) or its [Japanese version](USER_DOC_JA.md) for
+operation, and [DEV_DOC.md](DEV_DOC.md) or its [Japanese version](DEV_DOC_JA.md)
+for development and storage details.
+
 ### Available commands
 
 | Command | Action |
@@ -253,10 +296,23 @@ curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/
 `-k` skips certificate verification for the self-signed certificate in this test.
 An initialized site should return `HTTP/1.1 200 OK`.
 
+Check the bonus routes and stylesheet:
+
+```sh
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/style.css
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
+```
+
+Expect `200 OK`, with `Content-Type: text/css` for the stylesheet. In a browser,
+check the introduction page's layout, sign in to Adminer, and view an existing
+WordPress table such as `wp_posts`. Also check that WordPress still works.
+
 ## Validation
 
-The stack was manually tested on an Ubuntu 22.04.5 LTS ARM64 VM with Docker
-Engine 29.9.2 and Docker Compose 5.6.1. The following checks passed:
+The mandatory three-service stack was manually tested on an Ubuntu 22.04.5 LTS
+ARM64 VM with Docker Engine 29.9.2 and Docker Compose 5.6.1. The following
+results cover that earlier validation, before the bonus services were added:
 
 - All three images built and all services remained running.
 - WP-CLI reported that WordPress was installed, and HTTPS returned `200 OK`.
@@ -266,6 +322,10 @@ Engine 29.9.2 and Docker Compose 5.6.1. The following checks passed:
 - Both named volume mountpoints were under `/home/rysato/data`.
 - Connections restricted to TLS 1.2 and TLS 1.3 each returned `200 OK`.
 - Connecting to HTTP port 80 failed, as expected for this configuration.
+
+For the five-service deployment, use the verification procedure above and
+confirm that all five services remain running, both bonus pages work after
+container recreation and a VM reboot, and saved WordPress content remains.
 
 ## Resources
 
@@ -277,14 +337,19 @@ Engine 29.9.2 and Docker Compose 5.6.1. The following checks passed:
 - [WP-CLI installation guide](https://make.wordpress.org/cli/handbook/guides/installing/) and [commands](https://developer.wordpress.org/cli/commands/): WordPress setup and account management.
 - [NGINX HTTPS configuration](https://nginx.org/en/docs/http/configuring_https_servers.html): certificates and TLS settings.
 - [NGINX FastCGI module](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html): forwarding PHP requests to PHP-FPM.
+- [NGINX proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html): forwarding HTTP requests to the static website.
+- [Adminer](https://www.adminer.org/): the database management application.
+- [42 Tokyo](https://42tokyo.jp/): source information for the static introduction page.
 
 ### AI assistance
 
-AI assistance was used to explain shell syntax, SQL initialization, Docker
-configuration, FastCGI, and TLS; draft WordPress and NGINX Dockerfiles,
-configuration files, and entrypoint logic; and review the MariaDB entrypoint.
-It also helped correct the MariaDB initialization order and completion marker,
-used for the Makefile and this README, and guide VM setup and troubleshooting.
+AI assistance was used to explain shell syntax, SQL initialization, Docker,
+FastCGI, and TLS; draft and review Dockerfiles, configuration, and startup logic;
+and correct MariaDB's initialization order and completion marker. It also helped
+prepare the Makefile, English and Japanese documentation, the static website's
+HTML/CSS, and the Adminer container and routing configuration. VM setup and
+troubleshooting were supported by AI explanations.
+
 MariaDB initialization and retry behavior were checked with isolated tests.
-The full stack was then built and manually exercised in the VM, including
+The mandatory stack was built and manually exercised in the VM, including
 account access, content editing, comments, persistence, and TLS connections.

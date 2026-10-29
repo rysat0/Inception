@@ -34,7 +34,7 @@ timedatectl status
 ```
 
 Dockerはクライアントとサーバーの両方の情報が表示されることを確認してください。
-ビルド時にはパッケージとWP-CLIを、WordPressの初回起動時には本体のファイルを取得します。
+ビルド時にはパッケージ、WP-CLI、Adminerを、WordPressの初回起動時には本体のファイルを取得します。
 VMがインターネットに接続でき、時刻が同期されていることも必要です。
 
 リポジトリをcloneします。
@@ -162,9 +162,15 @@ make ps
 コンテナを起動せず、ビルドだけ行う場合は`make build`を使います。
 
 Composeのプロジェクト名は`inception`です。
-3つのサービスディレクトリから、`mariadb:inception`、`wordpress:inception`、
-`nginx:inception`というローカルイメージをビルドします。
-それぞれのイメージは、専用のentrypointスクリプトで起動します。
+`mariadb:inception`、`wordpress:inception`、`nginx:inception`、
+`website:inception`、`adminer:inception`の5つのローカルイメージをビルドします。
+必須サービスはentrypointスクリプトを使います。
+2つのボーナスサービスは、exec形式の`CMD`からNGINXまたはPHP-FPMを直接起動します。
+
+5サービスは同じComposeファイルに含まれており、`make`で起動します。
+ホスト側へポートを公開するのは入口のNGINXだけです。
+`website`は内部の8080番、WordPressとAdminerはそれぞれのコンテナ内の9000番で待ち受けます。
+コンテナが別であれば、内部のポート番号は同じでも構いません。
 
 `depends_on`が指定するのは起動順序です。アプリケーションが利用可能になったことまでは保証しません。
 そのため、WordPressはDBへのクエリを最大30回試し、接続できてから先へ進みます。
@@ -179,6 +185,8 @@ Composeのプロジェクト名は`inception`です。
 | `srcs/requirements/<service>/Dockerfile` | 各イメージのパッケージ、コピーするファイル、entrypoint。 |
 | `srcs/requirements/<service>/conf/` | MariaDB、PHP-FPM、NGINXの設定。 |
 | `srcs/requirements/<service>/tools/entrypoint.sh` | 起動時の検証と初期化。 |
+| `srcs/requirements/bonus/website/` | 静的サイトのDockerfile、NGINX設定、`site/`内のHTML/CSS。 |
+| `srcs/requirements/bonus/adminer/` | AdminerのDockerfileとPHP-FPMのプール設定。 |
 
 Dockerfileは設定ファイルやスクリプトをイメージ内へコピーします。
 これらを編集した後は`make up`を実行し、再ビルドと、変更の影響を受けるコンテナの再作成を行います。
@@ -194,6 +202,9 @@ docker compose -f srcs/docker-compose.yml images
 docker compose -f srcs/docker-compose.yml logs --tail=100 mariadb
 docker compose -f srcs/docker-compose.yml exec wordpress sh
 docker compose -f srcs/docker-compose.yml exec nginx nginx -t
+docker compose -f srcs/docker-compose.yml exec website nginx -t
+docker compose -f srcs/docker-compose.yml exec adminer php-fpm8.2 -t
+docker compose -f srcs/docker-compose.yml exec adminer php -l /var/www/adminer/index.php
 docker network inspect inception_inception
 ```
 
@@ -221,6 +232,50 @@ Makefileの`down`ターゲットは`--volumes`を指定しないため、named v
 これらは既存のアプリケーションとDBに対する変更として、明示的に更新してください。
 特にDBパスワードを変更する際は、ボリューム内のWordPress設定も整合させる必要があります。
 MariaDBのmarkerを削除する操作は、パスワードを変更するための手順ではありません。
+
+## ボーナスサービスの開発
+
+### 静的紹介サイト
+
+`srcs/requirements/bonus/website/site/index.html`と`style.css`を編集します。
+Dockerfileは`site/`を`website`イメージ内の`/var/www/website`へコピーします。
+NGINXの設定は`srcs/requirements/bonus/website/conf/website.conf`にあり、8080番で待ち受けます。
+
+入口側の`srcs/requirements/nginx/conf/nginx.conf`では、`/intro`を`/intro/`へリダイレクトし、
+`/intro/`へのリクエストをHTTPで`website:8080`へ転送します。
+`proxy_pass http://website:8080/;`の末尾の`/`により、転送時に`/intro/`部分を`/`へ置き換えます。
+そのため、公開パスの下でも`./style.css`などの相対パスを使えます。
+
+静的ファイルやサーバー設定を編集した後は、再ビルドします。
+
+```sh
+make up
+```
+
+静的ファイルはホストからbind mountせず、イメージ内へコピーします。
+ソースの変更は再ビルドで反映されます。既存コンテナを再起動するだけでは反映されません。
+このサービスに永続化用のボリュームは必要ありません。
+
+### AdminerによるDB管理画面
+
+`srcs/requirements/bonus/adminer/Dockerfile`は、Debian BookwormへPHP-FPM、PHP CLI、
+MySQL用拡張をインストールします。
+バージョンを固定したAdminer 6.2.0のMySQL/MariaDB向け配布物を
+`/var/www/adminer/index.php`として取得し、ビルド中に`php -l`で構文を確認します。
+プール設定は`srcs/requirements/bonus/adminer/conf/www.conf`です。
+必要に応じてワーカーを作成するondemand方式で、9000番で待ち受けます。
+
+入口側では`/adminer`を`/adminer/`へリダイレクトし、専用のFastCGI設定から
+`fastcgi_pass adminer:9000`で接続します。
+`SCRIPT_FILENAME`には、Adminerコンテナ内の固定パス`/var/www/adminer/index.php`を渡します。
+入口側にこのPHPファイルをコピーする必要はありません。
+
+Adminerはbridgeネットワーク経由でMariaDBへ接続します。
+ログイン画面では、サーバーに`mariadb`、ユーザー名に`DB_USER`、DB名に`DB_NAME`を指定し、
+現在のDBパスワードを入力します。初期パスワードは`secrets/db_password.txt`に保存されています。
+この2つのボーナスに追加の環境変数、secretファイル、永続化用ボリュームは必要ありません。
+Adminerはパスワードファイルをマウントしません。
+ログイン手順は[利用者向けドキュメント](USER_DOC_JA.md)を参照してください。
 
 ## ボリューム管理とデータの保存場所
 
@@ -251,6 +306,11 @@ WebサイトのファイルとアップロードしたファイルはWordPress�
 どちらのボリュームも、コンテナの作り直しや通常のVM再起動では消えません。
 WordPress用のボリュームには、DBの認証情報を含む`wp-config.php`もあるため、非公開の情報として扱ってください。
 
+ボーナス用のデータボリュームは追加しません。静的ファイルとAdminer本体はイメージに含まれます。
+Adminerが操作するDBの保存先は`mariadb_data`です。
+Adminerのログインセッションを専用ボリュームで永続化していないため、コンテナ再作成後には
+ログインし直す必要がある場合があります。
+
 サーバーの稼働中にMariaDBのデータファイルを直接編集しないでください。
 `docker compose down --volumes`などでボリュームを削除すると、保存済みデータも消えます。
 通常の再ビルド手順では、ボリュームを削除しません。
@@ -267,11 +327,20 @@ docker compose -f srcs/docker-compose.yml exec wordpress \
 docker compose -f srcs/docker-compose.yml exec wordpress \
     wp --allow-root --path=/var/www/html db query 'SELECT 1;' --connect-timeout=2
 curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/style.css
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
 ```
 
 初期化の成功メッセージ、クエリの結果の`1`、`HTTP/1.1 200 OK`が得られることを確認します。
 curlのオプションは、この自己署名証明書を使うローカル環境の確認で、名前解決と証明書検証を省略するためのものです。
 ブラウザでも変更した動作を確かめてください。コンテナの稼働状態だけでは、アプリケーション全体の正常動作は判断できません。
+
+5サービスが稼働を維持することを確認します。静的サイトのCSSが`text/css`として配信され、
+紹介ページの見た目が正しく表示されることを確認してください。
+Adminerへログインし、`wp_posts`などの既存テーブルを閲覧します。
+`/intro`と`/adminer`が末尾に`/`のあるURLへリダイレクトすることと、
+WordPressのトップページ・管理画面が引き続き動作することも確認します。
 
 永続化は次の手順で確認します。
 
@@ -279,6 +348,8 @@ curlのオプションは、この自己署名証明書を使うローカル環�
 2. `make re`を実行し、保存した内容が残っていることを確認します。
 3. VMを再起動します。サービスが自動起動しない場合は`make`を実行します。
 4. 固定ページとアカウントが利用できることを確認し、ボリュームのマウント元も再確認します。
+5. `/intro/`と`/adminer/`を再度開きます。静的ページを確認し、Adminerへログインして
+   WordPressの既存テーブルにアクセスできることを確認します。
 
 確認中は2つのボリュームを残してください。
 これまでのVMでの確認結果は、[READMEのValidation](README.md#validation)に記載しています。

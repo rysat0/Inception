@@ -34,7 +34,7 @@ timedatectl status
 ```
 
 Both Docker client and server information must be available. Ensure the VM has
-internet access and a synchronized clock; builds fetch packages and WP-CLI,
+internet access and a synchronized clock; builds fetch packages, WP-CLI, and Adminer,
 and the first WordPress startup downloads the core files.
 
 Clone the repository:
@@ -162,9 +162,16 @@ make ps
 `docker compose -f srcs/docker-compose.yml up -d --build`.
 To build without starting containers, use `make build`.
 
-The Compose project name is `inception`. It builds the local images
-`mariadb:inception`, `wordpress:inception`, and `nginx:inception` from the three
-service directories. Each image starts its own entrypoint script.
+The Compose project name is `inception`. It builds five local images:
+`mariadb:inception`, `wordpress:inception`, `nginx:inception`,
+`website:inception`, and `adminer:inception`.
+The mandatory services use entrypoint scripts. The two bonus services run
+NGINX or PHP-FPM directly using exec-form `CMD`.
+
+All five services are included in the same Compose file and start with `make`.
+Only the frontend NGINX publishes a host port. The `website` service listens
+internally on 8080, while WordPress and Adminer each listen on 9000 in their
+own containers. Separate containers can use the same internal port number.
 
 `depends_on` sets startup order; it does not establish application readiness.
 WordPress therefore retries a database query up to 30 times before proceeding.
@@ -180,6 +187,8 @@ the containers.
 | `srcs/requirements/<service>/Dockerfile` | Packages, copied files, and entrypoint for each image. |
 | `srcs/requirements/<service>/conf/` | MariaDB, PHP-FPM, and NGINX configuration. |
 | `srcs/requirements/<service>/tools/entrypoint.sh` | Startup validation and initialization. |
+| `srcs/requirements/bonus/website/` | Static site Dockerfile, NGINX configuration, and `site/` HTML/CSS. |
+| `srcs/requirements/bonus/adminer/` | Adminer Dockerfile and PHP-FPM pool configuration. |
 
 Dockerfiles copy configuration and scripts into images. After editing them, run
 `make up` to rebuild and let Compose recreate affected containers. For a complete
@@ -195,6 +204,9 @@ docker compose -f srcs/docker-compose.yml images
 docker compose -f srcs/docker-compose.yml logs --tail=100 mariadb
 docker compose -f srcs/docker-compose.yml exec wordpress sh
 docker compose -f srcs/docker-compose.yml exec nginx nginx -t
+docker compose -f srcs/docker-compose.yml exec website nginx -t
+docker compose -f srcs/docker-compose.yml exec adminer php-fpm8.2 -t
+docker compose -f srcs/docker-compose.yml exec adminer php -l /var/www/adminer/index.php
 docker network inspect inception_inception
 ```
 
@@ -226,6 +238,52 @@ explicit changes to the existing application and database. In particular,
 coordinate a database password change with the WordPress configuration stored
 in its volume. Removing the MariaDB marker is not a password rotation procedure.
 
+## Develop the bonus services
+
+### Static introduction site
+
+Edit `srcs/requirements/bonus/website/site/index.html` and `style.css`.
+The Dockerfile copies `site/` to `/var/www/website` in the `website` image.
+Its NGINX configuration is in
+`srcs/requirements/bonus/website/conf/website.conf` and listens on 8080.
+
+In the frontend's `srcs/requirements/nginx/conf/nginx.conf`, `/intro` redirects
+to `/intro/`, and the `/intro/` location proxies HTTP to `website:8080`.
+The trailing `/` in `proxy_pass http://website:8080/;` replaces the `/intro/`
+prefix with `/` when forwarding requests. Relative asset links such as
+`./style.css` therefore work under the public prefix.
+
+After editing the static files or server configuration, rebuild:
+
+```sh
+make up
+```
+
+Static files are copied into the image rather than bind-mounted from the host.
+Rebuilding applies source changes; restarting an existing container alone
+does not. This service does not require a persistent volume.
+
+### Adminer database interface
+
+`srcs/requirements/bonus/adminer/Dockerfile` installs PHP-FPM, PHP CLI, and the
+MySQL extension on Debian Bookworm. It downloads the pinned Adminer 6.2.0
+MySQL/MariaDB distribution as `/var/www/adminer/index.php` and checks it with
+`php -l` during the build. Its pool configuration is
+`srcs/requirements/bonus/adminer/conf/www.conf`; it uses on-demand workers
+and listens on 9000.
+
+The frontend redirects `/adminer` to `/adminer/` and uses a dedicated FastCGI
+location with `fastcgi_pass adminer:9000`. It passes the fixed
+`SCRIPT_FILENAME` `/var/www/adminer/index.php`, which is a path inside the
+Adminer container. The frontend does not need a copy of this PHP file.
+
+Adminer connects to MariaDB over the bridge network. Use server `mariadb`,
+`DB_USER`, `DB_NAME`, and the current database password in its login form;
+the initial password is stored in `secrets/db_password.txt`.
+No additional environment variables, secret files, or persistent volumes are
+needed for these two bonus services. Adminer does not mount the password files.
+For the login procedure, see [USER_DOC.md](USER_DOC.md).
+
 ## Manage volumes and locate project data
 
 | Compose volume | Docker volume name | Container path | Contents |
@@ -255,6 +313,11 @@ uploads are stored in the WordPress volume. Both volumes outlive container
 replacement and normal VM reboots. The WordPress volume also contains database
 credentials in `wp-config.php`, so treat its contents as private.
 
+The bonus services do not add data volumes: static files and the Adminer
+application are part of their images. Adminer operates on the database stored
+in `mariadb_data`. Its login session is not persisted by a dedicated volume,
+so signing in again may be necessary after container recreation.
+
 Do not edit MariaDB's raw database files while the server is running. Volume
 deletion, including `docker compose down --volumes`, removes persistent data
 and is not part of the normal rebuild workflow.
@@ -272,12 +335,21 @@ docker compose -f srcs/docker-compose.yml exec wordpress \
 docker compose -f srcs/docker-compose.yml exec wordpress \
     wp --allow-root --path=/var/www/html db query 'SELECT 1;' --connect-timeout=2
 curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/intro/style.css
+curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
 ```
 
 Expect the initialization success message, a successful query returning `1`,
 and `HTTP/1.1 200 OK`. The curl options bypass local DNS and certificate
 verification for this self-signed local setup. Also test the changed behavior
 in a browser; container status alone does not establish application correctness.
+
+Expect all five services to remain running. Check that the static stylesheet
+is served as `text/css` and the introduction page renders correctly. Sign in
+to Adminer and inspect an existing table such as `wp_posts`.
+Also check that `/intro` and `/adminer` return redirects to the slash-terminated
+URLs, and that the WordPress homepage and dashboard still work.
 
 For a persistence check:
 
@@ -286,6 +358,8 @@ For a persistence check:
 3. Reboot the VM and run `make` if the stack does not start automatically.
 4. Confirm that the page and accounts remain available and inspect the volume
    mountpoints again.
+5. Open `/intro/` and `/adminer/` again. Check the static page and sign in to
+   Adminer to confirm that the existing WordPress tables remain accessible.
 
 Keep both volumes throughout this check. Existing VM validation results are
 recorded in the [README](README.md#validation).
