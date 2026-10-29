@@ -62,12 +62,22 @@ services:
     restart: unless-stopped
     depends_on:
       - wordpress
+      - website
     environment:
       DOMAIN_NAME: ${DOMAIN_NAME:?DOMAIN_NAME is required}
     ports:
       - "443:443" # "host port:container port"
     volumes:
       - wordpress_data:/var/www/html:ro # read only
+    networks:
+      - inception
+
+  website:
+    build:
+      context: ./requirements/bonus/website
+    image: website:inception
+    pull_policy: never
+    restart: unless-stopped
     networks:
       - inception
 

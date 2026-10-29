@@ -284,7 +284,7 @@ AI assistance was used to explain shell syntax, SQL initialization, Docker
 configuration, FastCGI, and TLS; draft WordPress and NGINX Dockerfiles,
 configuration files, and entrypoint logic; and review the MariaDB entrypoint.
 It also helped correct the MariaDB initialization order and completion marker,
-create the Makefile and this README, and guide VM setup and troubleshooting.
+used for the Makefile and this README, and guide VM setup and troubleshooting.
 MariaDB initialization and retry behavior were checked with isolated tests.
 The full stack was then built and manually exercised in the VM, including
 account access, content editing, comments, persistence, and TLS connections.
