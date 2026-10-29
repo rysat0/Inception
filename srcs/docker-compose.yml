@@ -63,6 +63,7 @@ services:
     depends_on:
       - wordpress
       - website
+      - adminer
     environment:
       DOMAIN_NAME: ${DOMAIN_NAME:?DOMAIN_NAME is required}
     ports:
@@ -78,6 +79,17 @@ services:
     image: website:inception
     pull_policy: never
     restart: unless-stopped
+    networks:
+      - inception
+
+  adminer:
+    build:
+      context: ./requirements/bonus/adminer
+    image: adminer:inception
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      - mariadb
     networks:
       - inception
 
