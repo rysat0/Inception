@@ -34,7 +34,7 @@ timedatectl status
 ```
 
 Dockerはクライアントとサーバーの両方の情報が表示されることを確認してください。
-ビルド時にはパッケージ、WP-CLI、Adminerを、WordPressの初回起動時には本体のファイルを取得します。
+ビルド時にはパッケージ、WP-CLI、Adminerを、WordPressの初回起動時には本体とRedis Object Cacheプラグインを取得します。
 VMがインターネットに接続でき、時刻が同期されていることも必要です。
 
 リポジトリをcloneします。
@@ -163,17 +163,20 @@ make ps
 
 Composeのプロジェクト名は`inception`です。
 `mariadb:inception`、`wordpress:inception`、`nginx:inception`、
-`website:inception`、`adminer:inception`の5つのローカルイメージをビルドします。
+`website:inception`、`adminer:inception`、`redis:inception`の6つのローカルイメージをビルドします。
 必須サービスはentrypointスクリプトを使います。
-2つのボーナスサービスは、exec形式の`CMD`からNGINXまたはPHP-FPMを直接起動します。
+3つのボーナスサービスは、exec形式の`CMD`からNGINX、PHP-FPM、Redisを直接起動します。
 
-5サービスは同じComposeファイルに含まれており、`make`で起動します。
+6サービスは同じComposeファイルに含まれており、`make`で起動します。
 ホスト側へポートを公開するのは入口のNGINXだけです。
 `website`は内部の8080番、WordPressとAdminerはそれぞれのコンテナ内の9000番で待ち受けます。
 コンテナが別であれば、内部のポート番号は同じでも構いません。
+RedisはWordPressだけと共有する内部ネットワーク`cache`の6379番で待ち受けます。
+ホストへのポート公開は行わず、`inception`ネットワークには参加しません。
 
 `depends_on`が指定するのは起動順序です。アプリケーションが利用可能になったことまでは保証しません。
-そのため、WordPressはDBへのクエリを最大30回試し、接続できてから先へ進みます。
+そのため、WordPressはRedisへの接続とDBへのクエリをそれぞれ最大30回試し、接続できてから先へ進みます。
+Redisには`redis-cli ping`によるヘルスチェックも設定しています。
 `make logs`で起動時の出力を確認できます。Ctrl+Cでログ表示を終了しても、コンテナは停止しません。
 
 ## 開発とコンテナ管理
@@ -187,6 +190,7 @@ Composeのプロジェクト名は`inception`です。
 | `srcs/requirements/<service>/tools/entrypoint.sh` | 起動時の検証と初期化。 |
 | `srcs/requirements/bonus/website/` | 静的サイトのDockerfile、NGINX設定、`site/`内のHTML/CSS。 |
 | `srcs/requirements/bonus/adminer/` | AdminerのDockerfileとPHP-FPMのプール設定。 |
+| `srcs/requirements/bonus/redis/` | RedisのDockerfileとメモリ上限、削除方針、永続化の設定。 |
 
 Dockerfileは設定ファイルやスクリプトをイメージ内へコピーします。
 これらを編集した後は`make up`を実行し、再ビルドと、変更の影響を受けるコンテナの再作成を行います。
@@ -205,7 +209,9 @@ docker compose -f srcs/docker-compose.yml exec nginx nginx -t
 docker compose -f srcs/docker-compose.yml exec website nginx -t
 docker compose -f srcs/docker-compose.yml exec adminer php-fpm8.2 -t
 docker compose -f srcs/docker-compose.yml exec adminer php -l /var/www/adminer/index.php
+docker compose -f srcs/docker-compose.yml exec redis redis-cli ping
 docker network inspect inception_inception
+docker network inspect inception_cache
 ```
 
 コンテナのシェルからは`exit`で戻れます。
@@ -228,7 +234,7 @@ Makefileの`down`ターゲットは`--volumes`を指定しないため、named v
   NGINXの設定ファイルは起動のたびに生成します。
 
 `.env`やsecretファイルを変更しても、既存のDBアカウント、WordPressのパスワード、
-保存済みのサイトURL、`wp-config.php`は更新されません。
+保存済みのサイトURL、`wp-config.php`内の既存のDB接続設定は更新されません。
 これらは既存のアプリケーションとDBに対する変更として、明示的に更新してください。
 特にDBパスワードを変更する際は、ボリューム内のWordPress設定も整合させる必要があります。
 MariaDBのmarkerを削除する操作は、パスワードを変更するための手順ではありません。
@@ -273,9 +279,50 @@ MySQL用拡張をインストールします。
 Adminerはbridgeネットワーク経由でMariaDBへ接続します。
 ログイン画面では、サーバーに`mariadb`、ユーザー名に`DB_USER`、DB名に`DB_NAME`を指定し、
 現在のDBパスワードを入力します。初期パスワードは`secrets/db_password.txt`に保存されています。
-この2つのボーナスに追加の環境変数、secretファイル、永続化用ボリュームは必要ありません。
+静的サイトとAdminerに追加の環境変数、secretファイル、永続化用ボリュームは必要ありません。
 Adminerはパスワードファイルをマウントしません。
 ログイン手順は[利用者向けドキュメント](USER_DOC_JA.md)を参照してください。
+
+### Redisオブジェクトキャッシュ
+
+`srcs/requirements/bonus/redis/Dockerfile`はDebian BookwormにRedisをインストールし、
+専用の非rootユーザー`redis`で起動します。`conf/redis.conf`でフォアグラウンド実行と標準出力へのログを指定し、
+キャッシュのメモリ上限を128 MiBに設定します。上限に達すると`allkeys-lru`で最近使われていないキーを削除します。
+RDBスナップショットとAOFによる永続化は無効です。
+
+Redisには、WordPressと共有する内部bridgeネットワーク`cache`からだけ接続し、ホストへポートを公開しません。
+この信頼するネットワークで接続元を制限する構成のため、protected modeを無効にし、Redisのパスワードは設定していません。
+6379番を公開したり、信頼しないサービスをこのネットワークへ参加させたりしないでください。
+
+ComposeはWordPressへ`REDIS_HOST=redis`を渡し、WordPressイメージには`php8.2-redis`を追加します。
+起動のたびに`wp config set`で接続先、6379番ポート、`phpredis`クライアント、キーの接頭辞`inception:`、
+接続・読み取りタイムアウト各1秒を設定します。既存の`wp-config.php`にも反映します。
+entrypointは、既存のキャッシュ用drop-inを読み込むコマンドを実行する前にRedisへの接続を待ちます。
+Redis Object Cacheがなければ3.0.0をインストールし、有効化して`wp redis enable`を実行します。
+既存のプラグインのバージョンは保持します。管理画面でキャッシュを無効にしても、次回のコンテナ起動時に再び有効になります。
+
+既存の環境には`make up`で反映します。2つのデータボリュームを残し、追加のsecretファイルや`.env`の項目は必要ありません。
+プラグインはWordPress用ボリューム内に存在しない場合だけダウンロードします。
+
+別々のWordPressプロセス間で、キャッシュした値を取得できることを確認します。
+
+```sh
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html redis status
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache set inception_probe ready inception 60
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache get inception_probe inception
+docker compose -f srcs/docker-compose.yml exec redis \
+    redis-cli --scan --pattern 'inception:*'
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache delete inception_probe inception
+```
+
+キャッシュが接続済みで、値`ready`を取得でき、接頭辞付きのキーがRedisに存在することを確認します。
+サイトを繰り返し閲覧し、`redis-cli info stats`の`keyspace_hits`が増えることも確認します。
+キャッシュだけを消す場合はWordPressコンテナから`wp cache flush`を実行します。RedisのDBはこのサイト専用です。
+Redis再起動後にWordPressがキャッシュを作り直し、保存済みの投稿やアカウントが残ることも確認してください。
 
 ## ボリューム管理とデータの保存場所
 
@@ -310,6 +357,8 @@ WordPress用のボリュームには、DBの認証情報を含む`wp-config.php`
 Adminerが操作するDBの保存先は`mariadb_data`です。
 Adminerのログインセッションを専用ボリュームで永続化していないため、コンテナ再作成後には
 ログインし直す必要がある場合があります。
+Redisにもボリュームはありません。キャッシュは再起動後に作り直します。
+MariaDBやWordPressの永続化用ボリュームは引き続き必要です。
 
 サーバーの稼働中にMariaDBのデータファイルを直接編集しないでください。
 `docker compose down --volumes`などでボリュームを削除すると、保存済みデータも消えます。
@@ -336,7 +385,7 @@ curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
 curlのオプションは、この自己署名証明書を使うローカル環境の確認で、名前解決と証明書検証を省略するためのものです。
 ブラウザでも変更した動作を確かめてください。コンテナの稼働状態だけでは、アプリケーション全体の正常動作は判断できません。
 
-5サービスが稼働を維持することを確認します。静的サイトのCSSが`text/css`として配信され、
+6サービスが稼働を維持することを確認します。静的サイトのCSSが`text/css`として配信され、
 紹介ページの見た目が正しく表示されることを確認してください。
 Adminerへログインし、`wp_posts`などの既存テーブルを閲覧します。
 `/intro`と`/adminer`が末尾に`/`のあるURLへリダイレクトすることと、

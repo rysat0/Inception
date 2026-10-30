@@ -2,6 +2,7 @@
 set -eu
 
 : "${DB_HOST:?DB_HOST is required}"
+: "${REDIS_HOST:?REDIS_HOST is required}"
 : "${DB_NAME:?DB_NAME is required}"
 : "${DB_USER:?DB_USER is required}"
 : "${DB_PASSWORD_FILE:?DB_PASSWORD_FILE is required}"
@@ -57,6 +58,35 @@ if [ ! -f wp-config.php ]; then
         --skip-check
 fi
 
+# Apply cache settings to both new and existing WordPress volumes
+wp_cmd config set WP_REDIS_HOST "$REDIS_HOST"
+wp_cmd config set WP_REDIS_PORT 6379 --raw
+wp_cmd config set WP_REDIS_CLIENT phpredis
+wp_cmd config set WP_REDIS_PREFIX inception:
+wp_cmd config set WP_REDIS_TIMEOUT 1 --raw
+wp_cmd config set WP_REDIS_READ_TIMEOUT 1 --raw
+
+# An existing object-cache.php can connect during WordPress bootstrap
+# Wait before running commands that load WordPress, including after a reboot
+attempt=0
+until php -r '
+    try {
+        $redis = new Redis();
+        $redis->connect(getenv("REDIS_HOST"), 6379, 1);
+        exit($redis->ping() ? 0 : 1);
+    } catch (Throwable $error) {
+        exit(1);
+    }
+'; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+        echo "Error: cannot connect to Redis" >&2
+        exit 1
+    fi
+    echo "Waiting for Redis..."
+    sleep 2
+done
+
 
 # attempt: recurring until it success. inside until, written process when it still failure
 # >/dev/null: 標準出力を破棄する
@@ -89,6 +119,12 @@ if ! wp_cmd user get "$WP_USER" --field=ID >/dev/null 2>&1; then
         --user_pass="$WP_USER_PASSWORD" \
         --role=author
 fi
+
+if ! wp_cmd plugin is-installed redis-cache; then
+    wp_cmd plugin install redis-cache --version=3.0.0
+fi
+wp_cmd plugin activate redis-cache
+wp_cmd redis enable
 
 chown -R www-data:www-data /var/www/html
 

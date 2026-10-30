@@ -32,8 +32,10 @@ services:
     restart: unless-stopped
     depends_on:
       - mariadb
+      - redis
     environment:
       DB_HOST: mariadb:3306
+      REDIS_HOST: redis
       DB_NAME: ${DB_NAME:?DB_NAME is required} # Wordpressが利用するDB名
       DB_USER: ${DB_USER:?DB_USER is required} # Wordpress専用のDB User
       DB_PASSWORD_FILE: /run/secrets/db_password
@@ -53,6 +55,7 @@ services:
       - wordpress_data:/var/www/html
     networks:
       - inception
+      - cache
 
   nginx:
     build:
@@ -93,11 +96,26 @@ services:
     networks:
       - inception
 
-
+  redis:
+    build:
+      context: ./requirements/bonus/redis
+    image: redis:inception
+    pull_policy: never
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+    networks:
+      - cache
 
 networks:
   inception:
     driver: bridge
+  cache:
+    driver: bridge
+    internal: true
 
 volumes:
   mariadb_data:

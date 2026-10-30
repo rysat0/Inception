@@ -15,6 +15,7 @@
 | MariaDB | 投稿、固定ページ、コメント、アカウント、サイト設定の保存。 |
 | 静的サイト（`website`） | `https://rysato.42.fr/intro/`でHTML/CSSによる42 Tokyoの紹介ページを配信。 |
 | Adminer | `https://rysato.42.fr/adminer/`からブラウザでDBを閲覧・操作。 |
+| Redis | WordPressのオブジェクトをメモリ上にキャッシュ。内部利用のみで、公開URLはない。 |
 
 外部に公開するのは、入口のNGINXのHTTPS・443番ポートだけです。
 NGINXがWordPress、静的サイト、Adminerへアクセスを振り分けます。
@@ -29,7 +30,7 @@ make
 make ps
 ```
 
-`mariadb`、`wordpress`、`nginx`、`website`、`adminer`の5サービスが`Up`と表示されることを確認してください。
+`mariadb`、`wordpress`、`nginx`、`website`、`adminer`、`redis`の6サービスが`Up`と表示されることを確認してください。
 初回はWordPressのダウンロードとインストールがあるため、時間がかかる場合があります。
 後述のチェックで、サイトが利用可能になったことも確認します。
 
@@ -146,7 +147,7 @@ make ps
 make logs
 ```
 
-5サービスが`Up`を維持し、NGINXが`443`番ポートを公開していることを確認します。
+6サービスが`Up`を維持し、NGINXが`443`番ポートを公開していることを確認します。
 `Restarting`を繰り返している場合や`Exited`の場合は、起動処理に問題があります。
 Ctrl+Cでログ表示を終了できます。この操作でサービスは停止しません。
 
@@ -156,7 +157,7 @@ Ctrl+Cでログ表示を終了できます。この操作でサービスは停�
 docker compose -f srcs/docker-compose.yml logs --tail=100 wordpress
 ```
 
-ほかのサービスを調べる場合は、`wordpress`を`mariadb`、`nginx`、`website`、`adminer`へ置き換えてください。
+ほかのサービスを調べる場合は、`wordpress`を`mariadb`、`nginx`、`website`、`adminer`、`redis`へ置き換えてください。
 
 ### WordPressの初期化とDB接続
 
@@ -205,6 +206,23 @@ curl -kI --resolve rysato.42.fr:443:127.0.0.1 https://rysato.42.fr/adminer/
 ソースファイルを編集した場合は、開発者が該当するイメージを再ビルドする必要があります。
 Adminerで変更したDBの内容は、既存のMariaDB用ボリュームに保存されます。
 
+### Redisオブジェクトキャッシュ
+
+Redisとの連携はWordPressの起動時に自動で有効になります。
+リクエストをまたいでオブジェクトをキャッシュし、投稿やアカウントなどの永続データはMariaDBに保存します。
+Redisを再起動するとキャッシュは消え、WordPressが必要に応じて作り直します。
+
+```sh
+docker compose -f srcs/docker-compose.yml exec redis redis-cli ping
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html redis status
+```
+
+`PONG`が返り、キャッシュが接続済みで、drop-inが有効であることを確認します。
+管理者はWordPress管理画面のSettings（設定）> Redisからも確認できます。
+RedisはWordPressと専用の内部ネットワークを共有し、公開ポートやログインページはありません。
+WordPressは稼働中もRedisを使うため、Redisが停止している間はリクエストが失敗する場合があります。
+
 ## よくある問題
 
 | 症状 | 確認すること |
@@ -217,6 +235,7 @@ Adminerで変更したDBの内容は、既存のMariaDB用ボリュームに保�
 | 紹介ページの見た目が崩れる、または古い内容が表示される。 | `/intro/style.css`を確認する。ソース変更後は`make up`で再ビルドし、ブラウザのキャッシュを使わずに再読み込みする。 |
 | Adminerへログインできない。 | サーバーに`mariadb`を指定し、`DB_USER`、`DB_NAME`、現在のDBパスワードを使う。MariaDBのログとアカウント設定も確認する。 |
 | WordPressでDB接続エラーが出る。 | MariaDBとWordPressのログを調べる。DBアカウントとWordPressの保存済み設定が一致しているか確認する。 |
+| WordPressでRedis接続エラーが出る。 | `redis`の起動状態とログを調べ、上記のRedis確認コマンドを実行する。`make up`で構成全体を起動する。 |
 | パスワードファイルがない、または空になっている。 | 上記の正しいファイルを復元してから`make`を実行する。新しいパスワードを入れるだけでは既存のアカウントは更新されない。 |
 | パスワード変更後にログインできない。 | 現在のWordPressのパスワードを使う。初期secretファイルが古い可能性がある。必要に応じて管理者に再設定を依頼する。 |
 | コメントが表示されない。 | 投稿がコメントを受け付けているか、管理者のComments（コメント）画面で承認待ちになっていないか確認する。 |

@@ -16,6 +16,7 @@ is located.
 | MariaDB | Storage for posts, pages, comments, accounts, and website settings. |
 | Static website (`website`) | An HTML/CSS introduction to 42 Tokyo at `https://rysato.42.fr/intro/`. |
 | Adminer | Browser-based database access at `https://rysato.42.fr/adminer/`. |
+| Redis | An in-memory WordPress object cache, used internally without a public URL. |
 
 Only HTTPS port 443 is published by the frontend NGINX. It routes requests to
 WordPress, the static website, and Adminer. Database access from a browser goes
@@ -30,7 +31,7 @@ make
 make ps
 ```
 
-All five services (`mariadb`, `wordpress`, `nginx`, `website`, and `adminer`)
+All six services (`mariadb`, `wordpress`, `nginx`, `website`, `adminer`, and `redis`)
 should appear as `Up`.
 The first startup may take longer while WordPress is downloaded and installed.
 Use the checks below to confirm that the website is ready.
@@ -40,7 +41,7 @@ Use the checks below to confirm that the website is ready.
 | `make stop` | Stops the services and keeps their containers and data. |
 | `make` | Starts the project again and builds images if needed. |
 | `make restart` | Restarts the existing containers. |
-| `make down` | Removes containers and the project network, preserving website and database volumes. |
+| `make down` | Removes containers and the project networks, preserving website and database volumes. |
 | `make re` | Removes the containers, then builds and starts the project again. Preserves the volumes. |
 
 Saved WordPress content survives these commands because it is stored in named
@@ -153,7 +154,7 @@ make ps
 make logs
 ```
 
-Expect all five services to remain `Up`, with port `443` published by NGINX.
+Expect all six services to remain `Up`, with port `443` published by NGINX.
 Repeated `Restarting` or `Exited` states indicate a startup problem.
 Press Ctrl+C to leave the log viewer; this does not stop the services.
 
@@ -163,7 +164,7 @@ For one service only, use its name:
 docker compose -f srcs/docker-compose.yml logs --tail=100 wordpress
 ```
 
-Replace `wordpress` with `mariadb`, `nginx`, `website`, or `adminer` to inspect
+Replace `wordpress` with `mariadb`, `nginx`, `website`, `adminer`, or `redis` to inspect
 the other services.
 
 ### WordPress and database readiness
@@ -214,6 +215,23 @@ The static website files and Adminer application are included in their images.
 The developer must rebuild the relevant image after editing source files.
 Database changes made through Adminer are stored in MariaDB's existing volume.
 
+### Redis object cache
+
+Redis is enabled automatically when WordPress starts. It caches objects across
+requests; posts, accounts, and other persistent data remain in MariaDB.
+Restarting Redis discards its cache, which WordPress rebuilds as needed.
+
+```sh
+docker compose -f srcs/docker-compose.yml exec redis redis-cli ping
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html redis status
+```
+
+Expect `PONG` and a connected cache with a valid drop-in. An administrator can
+also check **Settings > Redis** in the WordPress dashboard. Redis uses a
+dedicated internal network shared with WordPress and has no public port or login page.
+Redis is a runtime dependency; WordPress requests may fail while it is unavailable.
+
 ## Common problems
 
 | Symptom | What to check |
@@ -226,6 +244,7 @@ Database changes made through Adminer are stored in MariaDB's existing volume.
 | The introduction page has no styling or shows old content. | Check `/intro/style.css`, rebuild with `make up` after source changes, and reload the page without the browser cache. |
 | Adminer rejects the login. | Use server `mariadb`, `DB_USER`, `DB_NAME`, and the current database password. Check MariaDB's logs and account settings. |
 | WordPress reports a database connection error. | Inspect MariaDB and WordPress logs. Check that the database account and stored WordPress configuration agree. |
+| WordPress reports a Redis connection error. | Check that `redis` is running, inspect its logs, and run the Redis checks above. Use `make up` to start the complete stack. |
 | A password file is missing or empty. | Restore the correct file listed above, then run `make`. Replacing it with a new password will not update an existing account. |
 | Login fails after a password change. | Use the current WordPress password; its initial secret file may be out of date. Ask the administrator to reset the account if necessary. |
 | A comment does not appear. | Check whether comments are enabled on the post and whether the comment is pending approval in the administrator's **Comments** screen. |

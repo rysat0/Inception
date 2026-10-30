@@ -9,10 +9,10 @@ inside a Linux virtual machine using Docker Compose. It focuses on building
 service images, configuring networking and TLS, initializing a database, and
 preserving application data across container recreation and VM reboots.
 
-The stack contains five services built from custom Dockerfiles based on
+The stack contains six services built from custom Dockerfiles based on
 `debian:bookworm`. The mandatory services are NGINX, WordPress with PHP-FPM,
-and MariaDB. Two bonus services provide a static introduction to 42 Tokyo
-and the Adminer database management interface.
+and MariaDB. Three bonus services provide a static introduction to 42 Tokyo,
+the Adminer database management interface, and Redis object caching.
 
 ## Project description
 
@@ -27,6 +27,8 @@ Browser
    |-- /            -- FastCGI :9000 --> wordpress -- SQL :3306 --> mariadb
    |-- /intro/      -- HTTP    :8080 --> website
    `-- /adminer/    -- FastCGI :9000 --> adminer   -- SQL :3306 --> mariadb
+
+ wordpress -- Redis protocol :6379 --> redis (internal cache network)
 ```
 
 | Service | Role | Persistent data |
@@ -36,10 +38,13 @@ Browser
 | `mariadb` | Initializes the database and the WordPress database account, then runs MariaDB. | Stores database files in `mariadb_data` at `/var/lib/mysql`. |
 | `website` | Runs a separate NGINX instance serving the HTML/CSS introduction to 42 Tokyo on internal port 8080. | Static files are copied into its image; no persistent volume. |
 | `adminer` | Runs Adminer with PHP-FPM 8.2 on internal port 9000 for browser-based database access. | Application files are in its image; database changes are stored by MariaDB. |
+| `redis` | Stores WordPress object-cache entries in memory on internal port 6379. | No volume; cache entries are rebuilt after Redis restarts. |
 
 Only NGINX publishes a host port: `443`. Port `80` is not published, so there
 is no HTTP-to-HTTPS redirect. PHP-FPM and MariaDB communicate with other
 containers through the Compose bridge network using service names.
+WordPress and Redis also share a separate internal bridge network named
+`cache`. Redis is attached only to that network and publishes no host port.
 
 ### Bonus features
 
@@ -49,9 +54,13 @@ containers through the Compose bridge network using service names.
 - **Adminer:** `https://rysato.42.fr/adminer/` provides a database management
   interface. The frontend NGINX forwards FastCGI requests to the dedicated
   `adminer` container, which connects to MariaDB. `/adminer` redirects to `/adminer/`.
+- **Redis:** WordPress uses the Redis Object Cache plugin and the PhpRedis
+  extension to cache objects across requests. Redis has a 128 MiB cache limit,
+  evicts less recently used keys with `allkeys-lru`, and disables disk
+  persistence. MariaDB retains the site's persistent data. Redis has no public URL.
 
-Both services have their own Dockerfiles and containers and are started by the
-same `make` command as the mandatory services.
+All three bonus services have their own Dockerfiles and containers and start
+with the same `make` command as the mandatory services.
 
 ### Initialization and design choices
 
@@ -62,13 +71,15 @@ same `make` command as the mandatory services.
 - **WordPress:** downloads the core files and creates `wp-config.php` when
   absent. It waits for a successful database query before installing WordPress
   and creating two distinct accounts: an administrator and an author.
+  Each startup applies the Redis configuration, waits for Redis, and ensures
+  that the cache plugin and object-cache drop-in are enabled on existing volumes too.
 - **NGINX:** generates a self-signed certificate for `DOMAIN_NAME`, substitutes
   that variable into its configuration template, and checks the configuration
   before starting. Only TLS 1.2 and TLS 1.3 are enabled.
 - **Process lifecycle:** the mandatory service entrypoints finish with `exec`.
-  The `website` and `adminer` images use exec-form `CMD` to run NGINX and PHP-FPM
+  The bonus images use exec-form `CMD` to run NGINX, PHP-FPM, or Redis
   directly in the foreground. Compose uses `restart: unless-stopped` for all
-  five services.
+  six services. Redis runs as its unprivileged `redis` user.
 - **Storage:** two named volumes preserve database and website files. Docker's
   data-root is configured under `/home/rysato/data` in the VM so these volumes
   satisfy the project's storage location requirement.
@@ -77,9 +88,9 @@ same `make` command as the mandatory services.
 
 | Comparison | Difference and choice in this project |
 | --- | --- |
-| **Virtual Machines vs Docker** | A VM runs its own operating system and kernel. Containers run isolated processes that share their host's kernel. This project uses both: a Linux VM provides the host, and Docker separates the three services inside it. See [Docker's container overview](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/). |
+| **Virtual Machines vs Docker** | A VM runs its own operating system and kernel. Containers run isolated processes that share their host's kernel. This project uses both: a Linux VM provides the host, and Docker separates the services inside it. See [Docker's container overview](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/). |
 | **Secrets vs Environment Variables** | Environment variables carry configuration such as domain and account names. Passwords come from separate Compose secret files mounted under `/run/secrets`, with access granted per service. Local Compose secrets are file mounts, not an encrypted secret store. See [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/). |
-| **Docker Network vs Host Network** | A user-defined bridge gives containers their own network interfaces and service-name resolution. Host networking shares the host's network namespace. This stack uses a [bridge network](https://docs.docker.com/engine/network/drivers/bridge/) and explicitly publishes only port 443; it does not use [host networking](https://docs.docker.com/engine/network/drivers/host/). |
+| **Docker Network vs Host Network** | A user-defined bridge gives containers their own network interfaces and service-name resolution. Host networking shares the host's network namespace. This stack uses two [bridge networks](https://docs.docker.com/engine/network/drivers/bridge/), including an internal cache network, and explicitly publishes only port 443; it does not use [host networking](https://docs.docker.com/engine/network/drivers/host/). |
 | **Docker Volumes vs Bind Mounts** | Docker manages named volumes and their storage locations. Bind mounts attach a specific host path to a container. This project uses two [named volumes](https://docs.docker.com/engine/storage/volumes/) for application data, without bind-mount driver options. Secret files are mounted separately by Compose. See also [bind mounts](https://docs.docker.com/engine/storage/bind-mounts/). |
 
 ### Included sources
@@ -104,7 +115,8 @@ same `make` command as the mandatory services.
         ├── wordpress/
         └── bonus/
             ├── website/
-            └── adminer/
+            ├── adminer/
+            └── redis/
 ```
 
 Each service directory contains a `Dockerfile` and configuration files in `conf/`.
@@ -118,8 +130,9 @@ available in English and Japanese.
 ### Prerequisites
 
 Use a Linux VM with Docker Engine, the Docker Compose plugin, Make, OpenSSL,
-and curl. The VM needs internet access to download packages, WP-CLI, Adminer, and
-WordPress. Its clock must be synchronized for package repository and TLS checks.
+and curl. The VM needs internet access to download packages, WP-CLI, Adminer,
+WordPress, and the Redis Object Cache plugin. Its clock must be synchronized
+for package repository and TLS checks.
 Docker must be running, and the current user must be able to run Docker commands.
 
 Official installation instructions are available for
@@ -269,7 +282,7 @@ for development and storage details.
 | `make logs` | Follow the last 100 log lines per service; press Ctrl+C to exit. |
 | `make stop` | Stop containers while keeping them and their volumes. |
 | `make restart` | Restart existing containers. |
-| `make down` | Remove project containers and the network, preserving named volumes. |
+| `make down` | Remove project containers and networks, preserving named volumes. |
 | `make re` | Run `down`, then rebuild and start the stack. |
 
 `make restart` does not apply changes to images or Compose configuration.
@@ -308,6 +321,18 @@ Expect `200 OK`, with `Content-Type: text/css` for the stylesheet. In a browser,
 check the introduction page's layout, sign in to Adminer, and view an existing
 WordPress table such as `wp_posts`. Also check that WordPress still works.
 
+Check Redis and the WordPress object cache:
+
+```sh
+docker compose -f srcs/docker-compose.yml exec redis redis-cli ping
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html redis status
+```
+
+Expect `PONG` and a connected, valid object-cache drop-in. See the developer
+guide for a cache test across separate WordPress processes. Existing volumes
+are upgraded by `make up`; no `.env` changes or volume deletion are required.
+
 ## Validation
 
 The mandatory three-service stack was manually tested on an Ubuntu 22.04.5 LTS
@@ -323,9 +348,18 @@ results cover that earlier validation, before the bonus services were added:
 - Connections restricted to TLS 1.2 and TLS 1.3 each returned `200 OK`.
 - Connecting to HTTP port 80 failed, as expected for this configuration.
 
-For the five-service deployment, use the verification procedure above and
-confirm that all five services remain running, both bonus pages work after
-container recreation and a VM reboot, and saved WordPress content remains.
+On 2026-10-30, the six-service stack was also tested with isolated Linux ARM64
+containers on Docker Desktop, separate test volumes, and temporary credentials.
+Checks covered a fresh installation, upgrading an existing WordPress volume
+while preserving posts and accounts, cache values shared across separate
+WordPress processes, and increasing cache hits during HTTPS page requests.
+Redis and WordPress restarts, delayed Redis startup, full container recreation,
+and the WordPress, static-site, and Adminer HTTPS routes also passed.
+
+For the six-service deployment, use the verification procedure above and
+confirm that all six services remain running, Redis caching is connected,
+both bonus pages work after container recreation and a VM reboot, and saved
+WordPress content remains.
 
 ## Resources
 
@@ -339,6 +373,7 @@ container recreation and a VM reboot, and saved WordPress content remains.
 - [NGINX FastCGI module](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html): forwarding PHP requests to PHP-FPM.
 - [NGINX proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html): forwarding HTTP requests to the static website.
 - [Adminer](https://www.adminer.org/): the database management application.
+- [Redis configuration](https://redis.io/docs/latest/operate/oss_and_stack/management/config/) and [Redis Object Cache](https://github.com/rhubarbgroup/redis-cache): cache server and WordPress integration.
 - [42 Tokyo](https://42tokyo.jp/): source information for the static introduction page.
 
 ### AI assistance
@@ -349,6 +384,8 @@ and correct MariaDB's initialization order and completion marker. It also helped
 prepare the Makefile, English and Japanese documentation, the static website's
 HTML/CSS, and the Adminer container and routing configuration. VM setup and
 troubleshooting were supported by AI explanations.
+AI also helped add Redis, connect the WordPress object cache, and verify the
+integration using temporary Docker resources.
 
 MariaDB initialization and retry behavior were checked with isolated tests.
 The mandatory stack was built and manually exercised in the VM, including

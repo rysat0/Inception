@@ -35,7 +35,7 @@ timedatectl status
 
 Both Docker client and server information must be available. Ensure the VM has
 internet access and a synchronized clock; builds fetch packages, WP-CLI, and Adminer,
-and the first WordPress startup downloads the core files.
+and the first WordPress startup downloads the core files and Redis Object Cache plugin.
 
 Clone the repository:
 
@@ -162,19 +162,22 @@ make ps
 `docker compose -f srcs/docker-compose.yml up -d --build`.
 To build without starting containers, use `make build`.
 
-The Compose project name is `inception`. It builds five local images:
+The Compose project name is `inception`. It builds six local images:
 `mariadb:inception`, `wordpress:inception`, `nginx:inception`,
-`website:inception`, and `adminer:inception`.
-The mandatory services use entrypoint scripts. The two bonus services run
-NGINX or PHP-FPM directly using exec-form `CMD`.
+`website:inception`, `adminer:inception`, and `redis:inception`.
+The mandatory services use entrypoint scripts. The three bonus services run
+NGINX, PHP-FPM, or Redis directly using exec-form `CMD`.
 
-All five services are included in the same Compose file and start with `make`.
+All six services are included in the same Compose file and start with `make`.
 Only the frontend NGINX publishes a host port. The `website` service listens
 internally on 8080, while WordPress and Adminer each listen on 9000 in their
 own containers. Separate containers can use the same internal port number.
+Redis listens on 6379 on the separate internal `cache` network, shared only
+with WordPress. It does not publish a host port or join the `inception` network.
 
 `depends_on` sets startup order; it does not establish application readiness.
-WordPress therefore retries a database query up to 30 times before proceeding.
+WordPress therefore retries Redis connections and a database query up to
+30 times each before proceeding. Redis also has a `redis-cli ping` healthcheck.
 Follow startup output with `make logs`; Ctrl+C exits the viewer without stopping
 the containers.
 
@@ -189,6 +192,7 @@ the containers.
 | `srcs/requirements/<service>/tools/entrypoint.sh` | Startup validation and initialization. |
 | `srcs/requirements/bonus/website/` | Static site Dockerfile, NGINX configuration, and `site/` HTML/CSS. |
 | `srcs/requirements/bonus/adminer/` | Adminer Dockerfile and PHP-FPM pool configuration. |
+| `srcs/requirements/bonus/redis/` | Redis Dockerfile and memory, eviction, and persistence settings. |
 
 Dockerfiles copy configuration and scripts into images. After editing them, run
 `make up` to rebuild and let Compose recreate affected containers. For a complete
@@ -207,7 +211,9 @@ docker compose -f srcs/docker-compose.yml exec nginx nginx -t
 docker compose -f srcs/docker-compose.yml exec website nginx -t
 docker compose -f srcs/docker-compose.yml exec adminer php-fpm8.2 -t
 docker compose -f srcs/docker-compose.yml exec adminer php -l /var/www/adminer/index.php
+docker compose -f srcs/docker-compose.yml exec redis redis-cli ping
 docker network inspect inception_inception
+docker network inspect inception_cache
 ```
 
 Use `exit` to leave the container shell. Changes made directly in a container's
@@ -233,7 +239,8 @@ to remove containers and the network. The Makefile's `down` target does not pass
   new certificate. The NGINX configuration is generated on every startup.
 
 Changing `.env` or secret files does not migrate existing database accounts,
-WordPress passwords, the saved site URL, or `wp-config.php`. Handle those as
+WordPress passwords, the saved site URL, or existing database settings in
+`wp-config.php`. Handle those as
 explicit changes to the existing application and database. In particular,
 coordinate a database password change with the WordPress configuration stored
 in its volume. Removing the MariaDB marker is not a password rotation procedure.
@@ -281,8 +288,54 @@ Adminer connects to MariaDB over the bridge network. Use server `mariadb`,
 `DB_USER`, `DB_NAME`, and the current database password in its login form;
 the initial password is stored in `secrets/db_password.txt`.
 No additional environment variables, secret files, or persistent volumes are
-needed for these two bonus services. Adminer does not mount the password files.
+needed for the static site and Adminer. Adminer does not mount the password files.
 For the login procedure, see [USER_DOC.md](USER_DOC.md).
+
+### Redis object cache
+
+`srcs/requirements/bonus/redis/Dockerfile` installs Redis on Debian Bookworm
+and starts it as the unprivileged `redis` user. `conf/redis.conf` keeps it in
+the foreground, logs to stdout, limits cache memory to 128 MiB, and uses
+`allkeys-lru` eviction. RDB snapshots and AOF persistence are disabled.
+
+Redis is accessible only through the internal `cache` bridge shared with
+WordPress; no host port is published. This trusted network is the access
+boundary: protected mode is disabled and no Redis password is configured.
+Do not publish port 6379 or attach untrusted services to this network.
+
+Compose supplies `REDIS_HOST=redis` to WordPress, whose image includes
+`php8.2-redis`. Each startup uses `wp config set` to apply `WP_REDIS_HOST`,
+port 6379, the `phpredis` client, the `inception:` key prefix, and one-second
+connection/read timeouts. This also updates an existing `wp-config.php`.
+The entrypoint waits for Redis before commands that load an existing cache
+drop-in, installs Redis Object Cache 3.0.0 if missing, activates it, and runs
+`wp redis enable`. An existing plugin version is preserved. A cache disabled
+through the dashboard is enabled again at the next container startup.
+
+Run `make up` to apply Redis to an existing deployment. Keep both data volumes;
+no new secret files or `.env` entries are required. The plugin is downloaded
+only when missing from the WordPress volume.
+
+Verify that a cache value survives across separate WordPress processes:
+
+```sh
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html redis status
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache set inception_probe ready inception 60
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache get inception_probe inception
+docker compose -f srcs/docker-compose.yml exec redis \
+    redis-cli --scan --pattern 'inception:*'
+docker compose -f srcs/docker-compose.yml exec wordpress \
+    wp --allow-root --path=/var/www/html cache delete inception_probe inception
+```
+
+Expect a connected cache, the value `ready`, and prefixed Redis keys. Visit the
+site repeatedly and check `redis-cli info stats` for increasing `keyspace_hits`.
+To clear only the cache, use `wp cache flush` through the WordPress container;
+the Redis database is dedicated to this site. Restart Redis and verify that
+WordPress rebuilds its cache while saved posts and accounts remain available.
 
 ## Manage volumes and locate project data
 
@@ -317,6 +370,8 @@ The bonus services do not add data volumes: static files and the Adminer
 application are part of their images. Adminer operates on the database stored
 in `mariadb_data`. Its login session is not persisted by a dedicated volume,
 so signing in again may be necessary after container recreation.
+Redis also has no volume. Its cache is disposable and is rebuilt after restart;
+it never replaces the persistent MariaDB or WordPress volumes.
 
 Do not edit MariaDB's raw database files while the server is running. Volume
 deletion, including `docker compose down --volumes`, removes persistent data
@@ -345,7 +400,7 @@ and `HTTP/1.1 200 OK`. The curl options bypass local DNS and certificate
 verification for this self-signed local setup. Also test the changed behavior
 in a browser; container status alone does not establish application correctness.
 
-Expect all five services to remain running. Check that the static stylesheet
+Expect all six services to remain running. Check that the static stylesheet
 is served as `text/css` and the introduction page renders correctly. Sign in
 to Adminer and inspect an existing table such as `wp_posts`.
 Also check that `/intro` and `/adminer` return redirects to the slash-terminated
